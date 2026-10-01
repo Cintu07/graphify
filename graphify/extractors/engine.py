@@ -3180,6 +3180,28 @@ def _csharp_bare_call_name(name_node, source: bytes) -> str:
     return _read_text(name_node, source)
 
 
+def _csharp_member_call_parts(fn_node):
+    """``(name, receiver)`` nodes of a C# member call's ``function``, else None.
+
+    `recv.M()` is a member_access_expression (`expression` + `name` fields).
+    `recv?.M()` is the same call behind a null check: a
+    conditional_access_expression whose `condition` is the receiver and whose
+    member_binding_expression child carries the name. Reading both shapes here
+    keeps `?.` on the receiver-typed path; the raw-text fallback split
+    `_window?.Refresh` on the dot and recorded the receiver as `_window?`,
+    which no receiver table types, so the call was dropped (#3797).
+    """
+    if fn_node is None:
+        return None
+    if fn_node.type == "member_access_expression":
+        return fn_node.child_by_field_name("name"), fn_node.child_by_field_name("expression")
+    if fn_node.type == "conditional_access_expression":
+        for child in fn_node.named_children:
+            if child.type == "member_binding_expression":
+                return child.child_by_field_name("name"), fn_node.child_by_field_name("condition")
+    return None
+
+
 def _read_csharp_type_name(node, source: bytes) -> tuple[str, bool, str] | None:
     """Resolve a C# type name, whether it was qualified, and its qualifier prefix."""
     if node is None:
@@ -6332,9 +6354,9 @@ def _extract_generic(
                 # any same-named method in the corpus, silently mis-resolving
                 # `_server.Save()` to an unrelated `Cache.Save()` (#1609).
                 fn_node = node.child_by_field_name("function")
-                if fn_node is not None and fn_node.type == "member_access_expression":
-                    mname = fn_node.child_by_field_name("name")
-                    recv = fn_node.child_by_field_name("expression")
+                member_parts = _csharp_member_call_parts(fn_node)
+                if member_parts is not None:
+                    mname, recv = member_parts
                     if mname is not None:
                         # `recv.Get<int>(...)`: the name field is a
                         # generic_name; its raw text carries the type-argument
@@ -6411,8 +6433,8 @@ def _extract_generic(
                 # out.
                 if fn_node is not None:
                     call_tal = None
-                    if fn_node.type == "member_access_expression":
-                        ma_name = fn_node.child_by_field_name("name")
+                    if member_parts is not None:
+                        ma_name = member_parts[0]
                         if ma_name is not None and ma_name.type == "generic_name":
                             for tal_child in ma_name.children:
                                 if tal_child.type == "type_argument_list":
