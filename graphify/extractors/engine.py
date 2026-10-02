@@ -1359,6 +1359,7 @@ def _python_collect_assignment_targets(node, source: bytes, out: set[str]) -> No
 # Languages whose `self`/`this` member calls bind through _self_call_target.
 _SELF_CALL_LANGUAGES = frozenset({
     "tree_sitter_python", "tree_sitter_javascript", "tree_sitter_typescript",
+    "tree_sitter_swift",
 })
 
 def _self_call_target(
@@ -6521,8 +6522,9 @@ def _extract_generic(
             callee_name: str | None = None
             is_member_call: bool = False
             is_this_field_call: bool = False
-            # JS/TS `this.m()` / `super.m()`: kept apart from member_receiver,
-            # which feeds the receiver-typed resolvers and raw_calls.
+            # `this.m()` / `self.m()` / `super.m()` (and Swift's implicit
+            # self): kept apart from member_receiver, which feeds the
+            # receiver-typed resolvers and raw_calls.
             self_receiver: str | None = None
             swift_receiver: str | None = None
             member_receiver: str | None = None
@@ -6542,6 +6544,8 @@ def _extract_generic(
                 if first:
                     if first.type == "simple_identifier":
                         callee_name = _read_text(first, source)
+                        # Inside a method a bare `save()` is `self.save()`.
+                        self_receiver = "self"
                     elif first.type == "navigation_expression":
                         is_member_call = True
                         for child in first.children:
@@ -6553,6 +6557,10 @@ def _extract_generic(
                         # resolve it through the file's type table.
                         recv_node = first.children[0] if first.children else None
                         swift_receiver = _swift_receiver_name(recv_node, source)
+                        if recv_node is not None and recv_node.type == "self_expression":
+                            self_receiver = "self"
+                        elif recv_node is not None and recv_node.type == "super_expression":
+                            self_receiver = "super"
             elif config.ts_module == "tree_sitter_kotlin":
                 # Kotlin: first child may be simple_identifier/identifier or
                 # navigation_expression. PyPI's `tree_sitter_kotlin` produces
@@ -7040,14 +7048,18 @@ def _extract_generic(
                             curr_scope = scope_parents.get(curr_scope)
                         if not tgt_nid:
                             tgt_nid = label_to_nid.get(callee_name)
-                    elif is_member_call and (self_receiver or (
+                    elif self_receiver or (
                         config.ts_module == "tree_sitter_python"
+                        and is_member_call
                         and member_receiver in ("self", "cls", "super")
-                    )):
+                    ):
                         tgt_nid = _self_call_target(
                             caller_nid, callee_name, self_receiver or member_receiver or "",
                             label_to_nid, scope_parents, method_owner, methods_by_owner,
-                            _local_bases, walk_bases=self_receiver is None,
+                            _local_bases,
+                            walk_bases=config.ts_module not in (
+                                "tree_sitter_javascript", "tree_sitter_typescript",
+                            ),
                         )
                     else:
                         tgt_nid = label_to_nid.get(callee_name)

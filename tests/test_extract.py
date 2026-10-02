@@ -2278,6 +2278,51 @@ def test_js_this_call_to_inherited_method_keeps_its_edge(tmp_path, ext):
     assert ("svc_server_run", "svc_base_ping") in calls
 
 
+def test_swift_self_calls_bind_within_own_class_chain(tmp_path):
+    """`self.save()`, a bare `save()` (implicit self) and `super.ping()` must stay
+    on Server's chain, not jump to the class the file declares last."""
+    calls = _single_file_call_pairs(tmp_path, (
+        "class Base {\n"
+        "    func ping() -> Int { return 0 }\n"
+        "}\n"
+        "class Server: Base {\n"
+        "    func save() -> Int { return 1 }\n"
+        "    func flush() -> Int { return self.save() }\n"
+        "    func bare() -> Int { return save() }\n"
+        "    func run() -> Int { return self.ping() }\n"
+        "    func zuper() -> Int { return super.ping() }\n"
+        "}\n"
+        "class Cache {\n"
+        "    func save() -> Int { return 2 }\n"
+        "    func ping() -> Int { return 3 }\n"
+        "}\n"
+    ), "swift")
+    assert ("svc_server_flush", "svc_server_save") in calls
+    assert ("svc_server_bare", "svc_server_save") in calls
+    assert ("svc_server_run", "svc_base_ping") in calls
+    assert ("svc_server_zuper", "svc_base_ping") in calls
+    assert not any(tgt.startswith("svc_cache_") for _, tgt in calls), calls
+
+
+def test_swift_bare_call_to_free_function_and_extension_keep_their_edges(tmp_path):
+    """Implicit self only claims methods of the caller's own chain: a free
+    function, a constructor and a method reached from an extension of the same
+    type resolve exactly as before."""
+    calls = _single_file_call_pairs(tmp_path, (
+        "func helper() -> Int { return 1 }\n"
+        "class Foo {\n"
+        "    func a() -> Int { return helper() }\n"
+        "    func make() -> Foo { return Foo() }\n"
+        "}\n"
+        "extension Foo {\n"
+        "    func b() -> Int { return a() }\n"
+        "}\n"
+    ), "swift")
+    assert ("svc_foo_a", "svc_helper") in calls
+    assert ("svc_foo_make", "svc_foo") in calls
+    assert ("svc_foo_b", "svc_foo_a") in calls
+
+
 def test_python_qualified_call_ambiguous_class_bails(tmp_path):
     """When the class name is defined in 2+ files, the qualified call must not
     resolve — single-definition god-node guard (#1446)."""
