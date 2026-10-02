@@ -2278,6 +2278,50 @@ def test_js_this_call_to_inherited_method_keeps_its_edge(tmp_path, ext):
     assert ("svc_server_run", "svc_base_ping") in calls
 
 
+def test_ruby_self_sends_bind_within_own_class_chain(tmp_path):
+    """`self.save`, a paren-less `save` and an inherited `self.ping` must stay on
+    Server's chain, not jump to the class the file declares last."""
+    calls = _single_file_call_pairs(tmp_path, (
+        "class Base\n"
+        "  def ping; 0; end\n"
+        "end\n"
+        "class Server < Base\n"
+        "  def save; 1; end\n"
+        "  def flush; self.save; end\n"
+        "  def bare; save; end\n"
+        "  def run; self.ping; end\n"
+        "end\n"
+        "class Cache\n"
+        "  def save; 2; end\n"
+        "  def ping; 3; end\n"
+        "end\n"
+    ), "rb")
+    assert ("svc_server_flush", "svc_server_save") in calls
+    assert ("svc_server_bare", "svc_server_save") in calls
+    assert ("svc_server_run", "svc_base_ping") in calls
+    assert not any(tgt.startswith("svc_cache_") for _, tgt in calls), calls
+
+
+def test_ruby_implicit_self_keeps_top_level_and_mixin_edges(tmp_path):
+    """A top-level `def` and a mixed-in module method are not methods of an
+    unrelated class, so implicit-self sends to them resolve as before."""
+    calls = _single_file_call_pairs(tmp_path, (
+        "def helper\n"
+        "  1\n"
+        "end\n"
+        "module Greet\n"
+        "  def hi; 1; end\n"
+        "end\n"
+        "class Widget\n"
+        "  include Greet\n"
+        "  def use_helper; helper; end\n"
+        "  def say; hi; end\n"
+        "end\n"
+    ), "rb")
+    assert ("svc_widget_use_helper", "svc_helper") in calls
+    assert ("svc_widget_say", "svc_greet_hi") in calls
+
+
 def test_python_qualified_call_ambiguous_class_bails(tmp_path):
     """When the class name is defined in 2+ files, the qualified call must not
     resolve — single-definition god-node guard (#1446)."""
