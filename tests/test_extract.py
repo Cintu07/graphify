@@ -2234,6 +2234,50 @@ def test_python_self_call_to_stored_module_function_still_binds(tmp_path):
     assert ("svc_job_run", "svc_handler") in calls
 
 
+def _single_file_call_pairs(tmp_path, source, ext):
+    """Extract one source file and return {(caller_id, callee_id)} for calls edges."""
+    f = tmp_path / f"svc.{ext}"
+    f.write_text(source, encoding="utf-8")
+    result = extract([f], cache_root=tmp_path)
+    return {(e["source"], e["target"]) for e in result["edges"] if e["relation"] == "calls"}
+
+
+@pytest.mark.parametrize("ext", ["ts", "js"])
+def test_js_this_call_binds_to_own_class_not_last_declared(tmp_path, ext):
+    """`this.save()` in Server must reach Server.save, not the save() of a class
+    declared later in the file. An arrow function keeps the method's `this`."""
+    calls = _single_file_call_pairs(tmp_path, (
+        "class Server {\n"
+        "  save() { return 1; }\n"
+        "  flush() { return this.save(); }\n"
+        "  later() { return [1].map(() => this.save()); }\n"
+        "}\n"
+        "class Cache {\n"
+        "  save() { return 2; }\n"
+        "  flush() { return this.save(); }\n"
+        "}\n"
+    ), ext)
+    assert ("svc_server_flush", "svc_server_save") in calls
+    assert ("svc_server_flush", "svc_cache_save") not in calls
+    assert ("svc_server_later", "svc_server_save") in calls
+    assert ("svc_cache_flush", "svc_cache_save") in calls
+
+
+@pytest.mark.parametrize("ext", ["ts", "js"])
+def test_js_this_call_to_inherited_method_keeps_its_edge(tmp_path, ext):
+    """`extends` is only known after the symbol pass, so a method the class does
+    not define itself keeps the plain lookup instead of being refused."""
+    calls = _single_file_call_pairs(tmp_path, (
+        "class Base {\n"
+        "  ping() { return 0; }\n"
+        "}\n"
+        "class Server extends Base {\n"
+        "  run() { return this.ping(); }\n"
+        "}\n"
+    ), ext)
+    assert ("svc_server_run", "svc_base_ping") in calls
+
+
 def test_python_qualified_call_ambiguous_class_bails(tmp_path):
     """When the class name is defined in 2+ files, the qualified call must not
     resolve — single-definition god-node guard (#1446)."""

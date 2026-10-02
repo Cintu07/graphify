@@ -1356,7 +1356,12 @@ def _python_collect_assignment_targets(node, source: bytes, out: set[str]) -> No
         for c in node.children:
             _python_collect_assignment_targets(c, source, out)
 
-def _python_self_call_target(
+# Languages whose `self`/`this` member calls bind through _self_call_target.
+_SELF_CALL_LANGUAGES = frozenset({
+    "tree_sitter_python", "tree_sitter_javascript", "tree_sitter_typescript",
+})
+
+def _self_call_target(
     caller_nid: str,
     callee: str,
     receiver: str,
@@ -1365,8 +1370,14 @@ def _python_self_call_target(
     method_owner: dict[str, str],
     methods_by_owner: dict[tuple[str, str], str],
     class_bases: dict[str, list[str]],
+    walk_bases: bool = True,
 ) -> str | None:
-    """In-file target of `self.m()`, `cls.m()` or `super().m()`, else None.
+    """In-file target of `self.m()` / `cls.m()` / `super().m()` in Python and
+    `this.m()` / `super.m()` in JS/TS, else None.
+
+    ``walk_bases=False`` stops after the caller's own class and otherwise keeps
+    the plain lookup: JS/TS `extends` edges come from the later symbol pass, so
+    the chain is unknown here and an inherited `this.m()` must not be refused.
 
     The receiver is the caller's own instance, so the lookup starts at the
     enclosing class (skipped for `super`) and walks its in-file bases one level
@@ -1393,6 +1404,8 @@ def _python_self_call_target(
             hits = {methods_by_owner[(c, callee)] for c in level if (c, callee) in methods_by_owner}
             if hits:
                 return hits.pop() if len(hits) == 1 else None
+        if not walk_bases:
+            return fallback
         skip_own = False
         level = list(dict.fromkeys(
             base for c in level for base in class_bases.get(c, ()) if base not in seen
@@ -6215,10 +6228,11 @@ def _extract_generic(
         if _e.get("relation") == "inherits":
             _local_bases.setdefault(_e["source"], []).append(_e["target"])
 
-    # Class membership for Python self-calls (see _python_self_call_target).
+    # Class membership for self-calls (see _self_call_target): Python
+    # self/cls/super and JS/TS this/super.
     method_owner: dict[str, str] = {}
     methods_by_owner: dict[tuple[str, str], str] = {}
-    if config.ts_module == "tree_sitter_python":
+    if config.ts_module in _SELF_CALL_LANGUAGES:
         label_by_nid = {n["id"]: n["label"] for n in nodes}
         for e in edges:
             if e["relation"] == "method":
@@ -6507,6 +6521,9 @@ def _extract_generic(
             callee_name: str | None = None
             is_member_call: bool = False
             is_this_field_call: bool = False
+            # JS/TS `this.m()` / `super.m()`: kept apart from member_receiver,
+            # which feeds the receiver-typed resolvers and raw_calls.
+            self_receiver: str | None = None
             swift_receiver: str | None = None
             member_receiver: str | None = None
             kotlin_qualified_prefix: str | None = None
@@ -6893,6 +6910,12 @@ def _extract_generic(
                             if obj is not None and obj.type == "identifier":
                                 member_receiver = _read_text(obj, source)
                             elif (
+                                obj is not None
+                                and obj.type in ("this", "super")
+                                and config.ts_module in _SELF_CALL_LANGUAGES
+                            ):
+                                self_receiver = obj.type
+                            elif (
                                 config.ts_module == "tree_sitter_python"
                                 and obj is not None
                                 and obj.type == "call"
@@ -7017,14 +7040,14 @@ def _extract_generic(
                             curr_scope = scope_parents.get(curr_scope)
                         if not tgt_nid:
                             tgt_nid = label_to_nid.get(callee_name)
-                    elif (
+                    elif is_member_call and (self_receiver or (
                         config.ts_module == "tree_sitter_python"
-                        and is_member_call
                         and member_receiver in ("self", "cls", "super")
-                    ):
-                        tgt_nid = _python_self_call_target(
-                            caller_nid, callee_name, member_receiver, label_to_nid,
-                            scope_parents, method_owner, methods_by_owner, _local_bases,
+                    )):
+                        tgt_nid = _self_call_target(
+                            caller_nid, callee_name, self_receiver or member_receiver or "",
+                            label_to_nid, scope_parents, method_owner, methods_by_owner,
+                            _local_bases, walk_bases=self_receiver is None,
                         )
                     else:
                         tgt_nid = label_to_nid.get(callee_name)
